@@ -1,15 +1,4 @@
-#include <errno.h>
-#include <fcntl.h>
-#include <linux/in.h>
-#include <net/if.h>
-#include <net/if_arp.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
+#include "macchanger.h"
 
 #define CHECK_ERRNO(err)                                                       \
   ({                                                                           \
@@ -23,20 +12,19 @@
                  : __val);                                                     \
   })
 
-int openSocket();
-void printMac(int socketfd);
-void changeMac(int socketfd);
-
-int main(int argc, char **argv) {
-
-  int sfd = openSocket();
-  printMac(sfd);
-  changeMac(sfd);
-
-  printf("Mac has changed successfully\n");
-
-  return 0;
-}
+#define CHECK_ERRNO_FREE(err, toFree)                                          \
+  ({                                                                           \
+    int __val = (err);                                                         \
+    void *__toFree = (toFree);                                                 \
+    (__val == -1 ? ({                                                          \
+      fprintf(stderr, "ERROR: (%s:%d) -- %s\n", __FILE__, __LINE__,            \
+              strerror(errno));                                                \
+      __toFree ? free(__toFree) : exit(-1);                                    \
+      exit(-1);                                                                \
+      -1;                                                                      \
+    })                                                                         \
+                 : __val);                                                     \
+  })
 
 int openSocket() {
   int sfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -44,7 +32,7 @@ int openSocket() {
   return sfd;
 }
 
-void printMac(int socketfd) {
+void printMac(int socketfd, char *interface) {
   struct ifreq *req = (struct ifreq *)malloc(sizeof(struct ifreq));
   strcpy(req->ifr_ifrn.ifrn_name, "enp0s3");
   req->ifr_ifru.ifru_hwaddr.sa_family = AF_INET;
@@ -61,12 +49,30 @@ void printMac(int socketfd) {
          (unsigned char)req->ifr_ifru.ifru_hwaddr.sa_data[5]);
 }
 
-void changeMac(int socketfd) {
+void changeMac(int socketfd, char *interface, char *address) {
+  strToLower(interface);
+  if (!isValidInterface(interface)) {
+    printf("No such interface with the name: \"%s\"\n", interface);
+    exit(0);
+  }
+
+  strToLower(address);
+  if (!isValidAddress(address)) {
+    printf("\"%s\" invalid address\n", address);
+    exit(0);
+  }
+
   struct ifreq *req = (struct ifreq *)malloc(sizeof(struct ifreq));
-  strcpy(req->ifr_ifrn.ifrn_name, "enp0s3");
+  if (!req) {
+    fprintf(stderr, "ERROR: (%s:%d) -- %s\n", __FILE__, __LINE__,
+            strerror(errno));
+    exit(-1);
+  }
+
+  strcpy(req->ifr_ifrn.ifrn_name, interface);
   req->ifr_ifru.ifru_hwaddr.sa_family = ARPHRD_ETHER;
 
-  const char *addrStr = "40:32:58:12:85:12";
+  const char *addrStr = address;
   unsigned char addrBytes[6];
   sscanf(addrStr, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:", &addrBytes[0],
          &addrBytes[1], &addrBytes[2], &addrBytes[3], &addrBytes[4],
@@ -75,5 +81,36 @@ void changeMac(int socketfd) {
   memcpy(req->ifr_ifru.ifru_hwaddr.sa_data, addrBytes, 6);
 
   int res = ioctl(socketfd, SIOCSIFHWADDR, req);
-  CHECK_ERRNO(res);
+  CHECK_ERRNO_FREE(res, req);
+  free(req);
+}
+
+bool isValidInterface(char *interface) {
+  struct ifaddrs *addrs, *tmp;
+
+  getifaddrs(&addrs);
+  tmp = addrs;
+
+  while (tmp) {
+    if (tmp->ifa_addr && tmp->ifa_addr->sa_family == AF_PACKET)
+      if (strcmp(tmp->ifa_name, interface) == 0)
+        return true;
+
+    tmp = tmp->ifa_next;
+  }
+
+  freeifaddrs(addrs);
+  return false;
+}
+
+bool isValidAddress(char *address) {
+  // TODO:
+  // [ ] Check First Byte
+  // [ ] Check regex
+
+  if (strlen(address) != 17 || strcmp(address, "00:00:00:00:00:00") == 0 ||
+      strcmp(address, "ff:ff:ff:ff:ff:ff") == 0) {
+    return false;
+  }
+  return true;
 }
